@@ -1,0 +1,141 @@
+- name: Spin up GCP instances and configure them
+  hosts: localhost
+  gather_facts: no
+  vars:
+    service_account_file: "service_account.json"
+    private_key_file: "ansible-resource-creator"
+    snarkos_repo: "https://github.com/AleoHQ/snarkOS.git"
+    branch: "testnet3" 
+    project_id: "dataeng-390618"
+    zone: "northamerica-northeast2-a"
+    instance_base_name: "ansible-devnet-test-"
+    #instance_tags:
+    #  - "snarkos-ingress"
+    machine_type: "n1-standard-32"
+    image: "ubuntu-2004-focal-v20230817"
+    instance_count: 1
+
+  tasks:
+    - name: create a disk
+      google.cloud.gcp_compute_disk:
+        name: disk-instance
+        size_gb: 50
+        source_image: projects/ubuntu-os-cloud/global/images/ubuntu-2004-focal-v20231101
+        zone: northamerica-northeast2-a
+        project: dataeng-390618
+        auth_kind: serviceaccount
+        service_account_file: service_account.json
+        state: present
+      register: disk
+
+    #- name: create a network
+    #  google.cloud.gcp_compute_network:
+    #    name: network-instance
+    #    auto_create_subnetworks: 'true'
+    #    project: dataeng-390618
+    #    auth_kind: serviceaccount
+    #    service_account_file: service_account.json
+    #    state: present
+    #  register: network
+
+    - name: Create multiple GCP instances
+      google.cloud.gcp_compute_instance:
+        name: "{{ instance_base_name }}{{ item }}"
+        machine_type: "{{ machine_type }}"
+        disks:
+        - auto_delete: 'true'
+          boot: 'true'
+          source: "{{ disk }}"
+        zone: "{{ zone }}"
+        project: "{{ project_id }}"
+        auth_kind: "serviceaccount"
+        network_interfaces:
+        - network: 
+            selfLink: "projects/dataeng-390618/global/networks/techops-wather-node-ssh"
+        # You can specify subnetwork as well if needed
+          access_configs:
+          - name: External NAT
+            type: ONE_TO_ONE_NAT
+            nat_ip:
+              address: 34.124.112.193
+          subnetwork: 
+            selfLink: "projects/dataeng-390618/regions/northamerica-northeast2/subnetworks/snarkos-subnet"
+        service_account_file: "{{ service_account_file }}"
+      loop: "{{ range(1, instance_count + 1) | list }}"
+      register: gcp_instances
+
+    - name: Debug gcp_instances results
+      debug:
+        var: gcp_instances.results
+
+    - name: Wait for SSH to come up on all instances
+      wait_for:
+        port: 22
+        host: "{{ item.invocation.module_args.network_interfaces[0].access_configs[0].nat_ip.address }}"
+        search_regex: "OpenSSH"
+        delay: 10
+        timeout: 320
+        state: started
+      loop: "{{ gcp_instances.results }}"
+      loop_control:
+        loop_var: item
+      when: gcp_instances is defined and gcp_instances.results | length > 0
+
+
+    - name: Add new instances to in-memory inventory
+      add_host:
+        name: "{{ instance.name }}"
+        groups: "newly_created_GCP_instances"
+        ansible_host: "{{ instance.public_ip }}"
+        ansible_user: "ansible-resource-creator"
+        ansible_ssh_private_key_file: ansible-resource-creator
+      loop: "{{ gcp_instances.results }}"
+      loop_control:
+        loop_var: instance
+
+    - set_fact:
+        node_0_ip: "{{ gcp_instances.results[0].public_ip }}"
+
+- name: Set up snarkOS environment on the new instances
+  hosts: newly_created_GCP_instances
+  become: yes
+  vars:
+    snarkos_repo: "https://github.com/AleoHQ/snarkOS.git"
+    branch: "testnet3" 
+    node_0_ip: "{{ hostvars[groups['newly_created_GCP_instances'][0]]['ansible_host'] }}"
+  tasks:
+    - name: Clone snarkOS repository and check out the desired branch
+      block:
+        - name: Clone snarkOS repository
+          git:
+            repo: snarkos_repo
+            dest: "~/snarkOS"
+            version: branch
+            update: yes
+
+        - name: Run build script
+          command: sudo ~/snarkOS/build_ubuntu.sh
+          args:
+            chdir: "~/snarkOS"
+            creates: "~/snarkOS/target/release/snarkos"
+
+        - name: Copy analytics script over
+          copy:
+            src: "/local/path/to/analytics_script.sh"
+            dest: "/remote/path/to/analytics_script.sh"
+            mode: '0755'
+
+        - name: Start snarkOS in tmux session on all instances
+          shell: |
+            tmux new-session -d -s snarkos-session
+            tmux send-keys -t snarkos-session "snarkos start --nodisplay --bft 0.0.0.0:5000 --rest 0.0.0.0:3033 --peers {{ node_0_ip }}:4133 --validators {{ node_0_ip }}:5000 --verbosity 1 --dev {{ inventory_hostname.split('-')[-1] }} --dev-num-validators {{ instance_count }} --validator" C-m
+          args:
+            executable: /bin/bash
+            chdir: "~/snarkOS"
+
+      when: gcp_instances.changed
+
+
+
+
+
