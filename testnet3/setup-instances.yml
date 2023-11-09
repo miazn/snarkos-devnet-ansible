@@ -51,15 +51,13 @@
         auth_kind: "serviceaccount"
         network_interfaces:
         - network: 
-            selfLink: "projects/dataeng-390618/global/networks/techops-wather-node-ssh"
+            selfLink: "projects/dataeng-390618/global/networks/ansible-node-network"
         # You can specify subnetwork as well if needed
           access_configs:
           - name: External NAT
             type: ONE_TO_ONE_NAT
-            nat_ip:
-              address: 34.124.112.193
           subnetwork: 
-            selfLink: "projects/dataeng-390618/regions/northamerica-northeast2/subnetworks/snarkos-subnet"
+            selfLink: "projects/dataeng-390618/regions/northamerica-northeast2-a/subnetworks/ansible-node-network"
         service_account_file: "{{ service_account_file }}"
       loop: "{{ range(1, instance_count + 1) | list }}"
       register: gcp_instances
@@ -71,7 +69,7 @@
     - name: Wait for SSH to come up on all instances
       wait_for:
         port: 22
-        host: "{{ item.invocation.module_args.network_interfaces[0].access_configs[0].nat_ip.address }}"
+        host: "{{ item.networkInterfaces[0].accessConfigs[0].natIP }}"
         search_regex: "OpenSSH"
         delay: 10
         timeout: 320
@@ -79,38 +77,43 @@
       loop: "{{ gcp_instances.results }}"
       loop_control:
         loop_var: item
-      when: gcp_instances is defined and gcp_instances.results | length > 0
+      when: 
+        - "gcp_instances is defined"
+        - "gcp_instances.results | length > 0"
+        - "item.networkInterfaces is defined"
+        - "item.networkInterfaces[0].accessConfigs is defined"
+        - "item.networkInterfaces[0].accessConfigs[0].natIP is defined"
 
 
     - name: Add new instances to in-memory inventory
       add_host:
-        name: "{{ instance.name }}"
+        name: "{{ item.name }}"
         groups: "newly_created_GCP_instances"
-        ansible_host: "{{ instance.public_ip }}"
+        ansible_host: "{{ item.networkInterfaces[0].accessConfigs[0].natIP }}"
         ansible_user: "ansible-resource-creator"
-        ansible_ssh_private_key_file: ansible-resource-creator
+        ansible_ssh_private_key_file: "ansible-resource-creator"
       loop: "{{ gcp_instances.results }}"
       loop_control:
-        loop_var: instance
+        loop_var: item
 
     - set_fact:
-        node_0_ip: "{{ gcp_instances.results[0].public_ip }}"
+        node_0_ip: "{{ gcp_instances.results[0].networkInterfaces[0].accessConfigs[0].natIP }}"
 
 - name: Set up snarkOS environment on the new instances
   hosts: newly_created_GCP_instances
   become: yes
   vars:
-    snarkos_repo: "https://github.com/AleoHQ/snarkOS.git"
-    branch: "testnet3" 
+    snarkos_repo: "https://github.com/eqlabs/snarkOS"
+    branch: "metrics" 
     node_0_ip: "{{ hostvars[groups['newly_created_GCP_instances'][0]]['ansible_host'] }}"
   tasks:
     - name: Clone snarkOS repository and check out the desired branch
       block:
         - name: Clone snarkOS repository
           git:
-            repo: snarkos_repo
+            repo: "{{snarkos_repo }}"
             dest: "~/snarkOS"
-            version: branch
+            version: "{{ branch }}"
             update: yes
 
         - name: Run build script
@@ -118,6 +121,16 @@
           args:
             chdir: "~/snarkOS"
             creates: "~/snarkOS/target/release/snarkos"
+      
+        - name: cargo build features metrics
+          shell: |
+            cargo build --features metrics
+
+        - name: Start docker-compose on node_0 only so we can get prom and grafana
+          command: docker-compose up -d
+          args:
+            chdir: "~/snarkOS/node/metrics" 
+          when: ansible_host == node_0_ip
 
         - name: Copy analytics script over
           copy:
@@ -133,7 +146,7 @@
             executable: /bin/bash
             chdir: "~/snarkOS"
 
-      when: gcp_instances.changed
+      #when: gcp_instances.changed
 
 
 
