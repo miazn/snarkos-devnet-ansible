@@ -51,13 +51,14 @@
         auth_kind: "serviceaccount"
         network_interfaces:
         - network: 
-            selfLink: "projects/dataeng-390618/global/networks/ansible-node-network"
+            # yes i know this network name is spelled wrong its fine
+            selfLink: "projects/dataeng-390618/global/networks/techops-wather-node-ssh"
         # You can specify subnetwork as well if needed
           access_configs:
           - name: External NAT
             type: ONE_TO_ONE_NAT
           subnetwork: 
-            selfLink: "projects/dataeng-390618/regions/northamerica-northeast2-a/subnetworks/ansible-node-network"
+            selfLink: "projects/dataeng-390618/regions/northamerica-northeast2/subnetworks/snarkos-subnet"
         service_account_file: "{{ service_account_file }}"
       loop: "{{ range(1, instance_count + 1) | list }}"
       register: gcp_instances
@@ -106,6 +107,7 @@
     snarkos_repo: "https://github.com/eqlabs/snarkOS"
     branch: "metrics" 
     node_0_ip: "{{ hostvars[groups['newly_created_GCP_instances'][0]]['ansible_host'] }}"
+    instance_count: 1
   tasks:
     - name: Clone snarkOS repository and check out the desired branch
       block:
@@ -116,27 +118,60 @@
             version: "{{ branch }}"
             update: yes
 
-        - name: Run build script
-          command: sudo ~/snarkOS/build_ubuntu.sh
-          args:
-            chdir: "~/snarkOS"
-            creates: "~/snarkOS/target/release/snarkos"
+        #- name: Run build script
+        #  command: sudo ~/snarkOS/build_ubuntu.sh
+        #  args:
+        #    chdir: "~/snarkOS"
+        #    creates: "~/snarkOS/target/release/snarkos"
       
+        - name: Install Rust and Cargo using rustup
+          shell: |
+              curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+              source $HOME/.cargo/env
+          args:
+            executable: /bin/bash
+
+        - name: Install Docker
+          apt:
+            name: docker.io
+            state: present
+            update_cache: yes
+          become: yes
+
+        - name: Ensure Docker service is started
+          service:
+            name: docker
+            state: started
+          become: yes
+
+        - name: Install Docker Compose
+          get_url:
+            url: "https://github.com/docker/compose/releases/download/1.29.2/docker-compose-{{ ansible_system }}-{{ ansible_architecture }}"
+            dest: "/usr/local/bin/docker-compose"
+            mode: 'u+x,g+x'
+          become: yes
+
         - name: cargo build features metrics
           shell: |
+            source $HOME/.cargo/env || true
             cargo build --features metrics
+          args:
+            chdir: "~/snarkOS" 
+            executable: /bin/bash
 
         - name: Start docker-compose on node_0 only so we can get prom and grafana
           command: docker-compose up -d
           args:
             chdir: "~/snarkOS/node/metrics" 
           when: ansible_host == node_0_ip
+          become: yes
+          become_user: root
 
-        - name: Copy analytics script over
-          copy:
-            src: "/local/path/to/analytics_script.sh"
-            dest: "/remote/path/to/analytics_script.sh"
-            mode: '0755'
+        #- name: Copy analytics script over
+        #  copy:
+        #    src: "/local/path/to/analytics_script.sh"
+        #    dest: "/remote/path/to/analytics_script.sh"
+        #    mode: '0755'
 
         - name: Start snarkOS in tmux session on all instances
           shell: |
@@ -145,6 +180,8 @@
           args:
             executable: /bin/bash
             chdir: "~/snarkOS"
+          become: yes
+          become_user: root
 
       #when: gcp_instances.changed
 
