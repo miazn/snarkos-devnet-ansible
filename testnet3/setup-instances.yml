@@ -13,7 +13,7 @@
     #  - "snarkos-ingress"
     machine_type: "n1-standard-32"
     image: "ubuntu-2004-focal-v20230817"
-    instance_count: 1
+    instance_count: 50
 
   tasks:
     - name: create a disk
@@ -107,7 +107,7 @@
     snarkos_repo: "https://github.com/eqlabs/snarkOS"
     branch: "metrics" 
     node_0_ip: "{{ hostvars[groups['newly_created_GCP_instances'][0]]['ansible_host'] }}"
-    instance_count: 1
+    instance_count: 50
   tasks:
     - name: Clone snarkOS repository and check out the desired branch
       block:
